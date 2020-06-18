@@ -1,5 +1,5 @@
 import argparse
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from google.cloud import bigquery
 from miso_org.client import MisoClient
 
@@ -18,15 +18,15 @@ def get_or_create_table(table_name: str):
     return table
 
 
-def get_timestamps(client: bigquery.Client, table_name: str):
+def exists(client: bigquery.Client, table_name: str, d: date):
     job_config = bigquery.QueryJobConfig()
     sql = f"""
     SELECT TS 
     FROM {table_name}
+    WHERE TS BETWEEN '{datetime(year=d.year, month=d.month, day=d.day, hour=0).isoformat(sep=' ')} UTC' AND '{datetime(year=d.year, month=d.month, day=d.day, hour=23).isoformat(sep=' ')} UTC'
     """
     results = client.query(sql, job_config=job_config)
-    results.result()
-    return
+    return results.result().total_rows > 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="ETL job for miso data")
@@ -50,8 +50,17 @@ if __name__ == '__main__':
     delta = timedelta(days=1)
 
     while current_date < end_date:
+        if exists(bq, table_name, current_date):
+            print(f"{str(current_date)} already exists... skipping")
+        else:
+            print(f"fetching {str(current_date)}... starting")
+            data = miso.day_ahead_lmp(current_date)
+            print(f"fetching {str(current_date)}... complete")
+            data = data.rename(lambda w: w.replace('.', '_'), axis='columns')
+            print(f"loading {str(current_date)}... starting")
+            bq.load_table_from_dataframe(data, table)
+            print(f"loading {str(current_date)}... complete")
 
-        current_date += end_date
+        current_date += delta
 
-
-
+    print(f"finished loading data for dates {str(start_date)} to {str(end_date)}")
