@@ -1,9 +1,8 @@
 import pandas as pd
 import re
 from datetime import date, datetime, timedelta
-import pytz
 
-class DayAheadMarketClient:
+class MisoClient:
 
     base_url = "https://docs.misoenergy.org/marketreports"
 
