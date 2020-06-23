@@ -1,71 +1,83 @@
-from datetime import date
+from datetime import date, timedelta
+from geopy.distance import geodesic
+from geopy.geocoders import Nominatim
 import os
+import pandas as pd
 import requests
 
+
 class WeatherClient:
-    headers = {
+    __auth = {
         'token': os.environ['NOAA_TOKEN'],
     }
-
-    base_url = 'https://www.ncdc.noaa.gov/cdo-web/api/v2'
-
-    cities = {
-        'Beaumont, TX US': 'CITY:US480007',
-        'Chicago, IL US': 'CITY:US170006',
-        'Columbus, OH US': 'CITY:US390011',
-        'Des Moines, IA US': 'CITY:US190008',
-        'Detroit, MI US': 'CITY:US260006',
-        'Fargo, ND US': 'CITY:US380003',
-        'Green Bay, WI US': 'CITY:US550002',
-        'Indianapolis, IN US': 'CITY:US180004',
-        'Jackson, MS US': 'CITY:US280011',
-        'Kansas City, MO US': 'CITY:US290008',
-        'Little Rock, AR US': 'CITY:US050013',
-        'Minneapolis, MN US': 'CITY:US270013',
-        'Nashville, TN US': 'CITY:US470016',
-        'New Orleans, LA US': 'CITY:US220016',
-        'Oklahoma City, OK US': 'CITY:US400013',
-        'Sioux City, IA US': 'CITY:US190017',
-        'St. Louis, MO US': 'CITY:US290021',
-    }
+    __url = 'https://www.ncdc.noaa.gov/cdo-web/api/v2'
+    __max_distance = 1000 # miles
+    geolocator = Nominatim(user_agent="grid-analysis-engine")
 
     def __init__(self):
+        self.stations = None
         pass
 
-    def streamed_results(self, url, headers=dict(), params=dict()):
+    def streamed_results(self, url, headers=None, params=None) -> pd.DataFrame:
         step = 1000
         offset = 0
+        __headers = self.__auth if (not headers) else headers.update(self.__auth)
+        __params = {} if (not params) else params.copy()
+
         accumulated = []
         while True:
-            temp_params = params.copy()
-            temp_params['offset'] = offset
-            temp_params['limit'] = step
-            response = requests.get(url, headers=headers, params=params).json()
+            __params['offset'] = offset
+            __params['limit'] = step
+            response = requests.get(url, headers=__headers, params=__params).json()
             if 'results' not in response:
                 break
-            accumulated.append(response['results'])
+            meta = response['metadata']['resultset']
+            accumulated.extend(response['results'])
+            if meta['offset'] + meta['limit'] >= meta['count']:
+                break
             offset += step
-        return accumulated
+        return pd.DataFrame(accumulated)
 
-    def find_code(self, keyword: str, type: str = 'CITY'):
-        results = self.streamed_results(
-            url=f"{self.base_url}/locations",
-            headers=self.headers,
-            params={'locationcategoryid': type},
-        )
-        codes = list(filter(lambda location: keyword in location['name'], results))
-        return [code['id'] for code in codes]
+    def list_stations(self) -> pd.DataFrame:
+        cache = f"{os.path.dirname(os.path.abspath(__file__))}/stations.csv"
+        if os.path.exists(cache):
+            print('loading stations from file')
+            return pd.read_csv(cache)
+        else:
+            print('streaming stations via api')
+            return self.streamed_results(url=f"{self.__url}/stations")
 
-    def hourly_data(self, code: str, start_date: date, end_date: date):
-        results = self.streamed_results(
-            url=f"{self.base_url}/data",
-            headers=self.headers,
+    def nearest_stations(self, name: str):
+        """
+        :param name: name of location to compare to
+        :return: ordered list of stations from nearest to farthest
+        """
+        if not self.stations:
+            self.stations = self.list_stations()
+
+        location = self.geolocator.geocode(name)
+
+        def distance(cmp):
+            return geodesic((cmp.latitude, cmp.longitude), (location.latitude, location.longitude))
+
+        with_distance = self.stations
+        with_distance['distance'] = with_distance.apply(distance, axis=1)
+        return with_distance.sort_values(by=['distance'])
+
+    def data_for_day(self, dataset_id: str, station_id: str, day: date) -> pd.DataFrame:
+        response = self.streamed_results(
+            url=f"{self.__url}/data",
             params={
-                'datasetid': 'NORMAL_HLY',
-                'locationid': code,
-                'startdate': start_date.isoformat(),
-                'enddate': end_date.isoformat(),
-                'units': 'standard',
+                "datasetid": dataset_id,
+                "stationid": station_id,
+                "startdate": day.isoformat(),
+                "enddate": (day + timedelta(day=1)).isoformat(),
+                "units": "standard",
             },
         )
-        return results
+        return response
+
+    def get(self, location: str, start_date: date, end_date) -> pd.DataFrame:
+        dataset = 'NORMAL_HLY'
+        ordered_stations = self.nearest_stations(location)['id']
+        return
